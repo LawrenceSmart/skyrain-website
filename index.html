@@ -1,221 +1,37 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Skyrain | Humanitarian Crypto System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+  <!-- Header -->
+  <header class="p-6 text-center">
+    <h1 class="text-4xl font-bold text-blue-600">Skyrain</h1>
+    <p class="text-lg mt-2">A non-profit humanitarian cryptocurrency system</p>
+  </header>
 
-/* ===== Interfaces (trimmed) ===== */
-interface IERC20 {
-  function decimals() external view returns (uint8);
-  function balanceOf(address) external view returns (uint);
-  function transfer(address,uint) external returns (bool);
-  function transferFrom(address,address,uint) external returns (bool);
-  function approve(address,uint) external returns (bool);
-}
+  <!-- Mission -->
+  <section class="max-w-3xl mx-auto p-6 text-center">
+    <h2 class="text-2xl font-semibold mb-3">Our Mission</h2>
+    <p class="text-gray-700 leading-relaxed">
+      Skyrain is an experimental, non-profit cryptocurrency designed to resist market manipulation and
+      channel transparent, community-reviewed aid to real people in need.
+      <br><br>
+      Our goal is to build a system where <span class="font-semibold">trust, fairness, and relief</span>
+      are embedded into the code itself — not dependent on middlemen.
+    </p>
+  </section>
 
-interface IUniswapV2Router02 {
-  function addLiquidity(
-    address tokenA, address tokenB,
-    uint amountADesired, uint amountBDesired,
-    uint amountAMin, uint amountBMin,
-    address to, uint deadline
-  ) external returns (uint amountA, uint amountB, uint liquidity);
-
-  function removeLiquidity(
-    address tokenA, address tokenB,
-    uint liquidity, uint amountAMin, uint amountBMin,
-    address to, uint deadline
-  ) external returns (uint amountA, uint amountB);
-}
-
-interface IUniswapV2Factory {
-  function getPair(address tokenA, address tokenB) external view returns (address);
-}
-
-interface ILPToken is IERC20 {} // Pair is ERC20
-/* ===== End Interfaces ===== */
-
-contract LPBootstrapLock {
-  // --- Immutable config ---
-  IERC20 public immutable stable;        // e.g., USDC
-  IERC20 public immutable token;         // your token
-  IUniswapV2Router02 public immutable router;
-  IUniswapV2Factory  public immutable factory;
-
-  address public immutable owner;        // replace with OZ Ownable in prod
-
-  // --- Parameters set at deploy ---
-  uint public immutable fundingEnd;      // timestamp
-  uint public immutable softCap;         // min stable (in smallest units)
-  uint public immutable hardCap;         // max stable
-  uint public immutable lockDuration;    // seconds (>= 365 days recommended)
-
-  // Price expressed as tokens per 1 stable, scaled by 1e18
-  uint public immutable tokensPerStableX1e18;
-
-  // Decimals cache
-  uint8 private immutable stableDec;
-  uint8 private immutable tokenDec;
-
-  // --- State ---
-  uint public totalRaised;               // stable raised
-  bool public finalized;
-  uint public unlockTime;
-
-  ILPToken public lpToken;               // set after finalize
-  uint public totalLP;                   // LP minted into this contract
-
-  mapping(address => uint) public contributed;  // stable per investor
-  mapping(address => uint) public lpClaimed;    // LP already claimed
-
-  // --- Modifiers (replace with OZ) ---
-  modifier onlyOwner { require(msg.sender == owner, "not owner"); _; }
-  modifier beforeEnd { require(block.timestamp < fundingEnd, "funding over"); _; }
-  modifier afterEnd { require(block.timestamp >= fundingEnd, "too early"); _; }
-  modifier notFinal { require(!finalized, "finalized"); _; }
-  modifier yesFinal { require(finalized, "not finalized"); _; }
-
-  constructor(
-    address _stable,
-    address _token,
-    address _router,
-    address _factory,
-    uint _fundingSecs,
-    uint _lockDurationSecs,
-    uint _softCap,
-    uint _hardCap,
-    uint _tokensPerStableX1e18
-  ) {
-    require(_stable!=address(0) && _token!=address(0) && _router!=address(0) && _factory!=address(0), "bad addr");
-    require(_hardCap==0 || _hardCap>=_softCap, "cap order");
-    require(_tokensPerStableX1e18>0, "price=0");
-
-    owner = msg.sender;
-    stable = IERC20(_stable);
-    token  = IERC20(_token);
-    router = IUniswapV2Router02(_router);
-    factory= IUniswapV2Factory(_factory);
-
-    fundingEnd    = block.timestamp + _fundingSecs;
-    lockDuration  = _lockDurationSecs;
-    softCap       = _softCap;
-    hardCap       = _hardCap;
-    tokensPerStableX1e18 = _tokensPerStableX1e18;
-
-    // cache decimals
-    stableDec = IERC20(_stable).decimals();
-    tokenDec  = IERC20(_token).decimals();
-  }
-
-  /* ---------- Investor functions ---------- */
-
-  function deposit(uint amount) external beforeEnd notFinal {
-    require(amount > 0, "amount=0");
-    if (hardCap > 0) {
-      require(totalRaised + amount <= hardCap, "over hardCap");
-    }
-    require(stable.transferFrom(msg.sender, address(this), amount), "stable xferFrom fail");
-    contributed[msg.sender] += amount;
-    totalRaised += amount;
-  }
-
-  function refundable() public view returns (bool) {
-    return !finalized && block.timestamp >= fundingEnd && totalRaised < softCap;
-  }
-
-  function refund() external afterEnd notFinal {
-    require(refundable(), "not refundable");
-    uint amt = contributed[msg.sender];
-    require(amt > 0, "no deposit");
-    contributed[msg.sender] = 0;
-    require(stable.transfer(msg.sender, amt), "refund fail");
-  }
-
-  /* ---------- Owner finalize ---------- */
-
-  function _calcTokensNeeded(uint stableAmt) internal view returns (uint tokensNeeded) {
-    // tokensNeeded = stableAmt * 10^(tokenDec - stableDec) * tokensPerStableX1e18 / 1e18
-    if (tokenDec >= stableDec) {
-      uint scale = 10 ** (tokenDec - stableDec);
-      tokensNeeded = (stableAmt * scale * tokensPerStableX1e18) / 1e18;
-    } else {
-      // Rare case: tokenDec < stableDec
-      uint scaleDown = 10 ** (stableDec - tokenDec);
-      tokensNeeded = (stableAmt * tokensPerStableX1e18) / (1e18 * scaleDown);
-    }
-  }
-
-  /// @param slippageBps e.g., 300 = 3% min-amount
-  function finalize(uint slippageBps) external onlyOwner afterEnd notFinal {
-    require(totalRaised >= softCap, "softCap not met");
-    require(slippageBps <= 5_000, "slippage too high"); // sanity
-
-    uint tokensNeeded = _calcTokensNeeded(totalRaised);
-    require(tokensNeeded > 0, "tokensNeeded=0");
-
-    // Pull or mint your tokens into this contract BEFORE calling finalize.
-    // Approvals
-    require(token.approve(address(router), tokensNeeded), "approve token");
-    require(stable.approve(address(router), totalRaised), "approve stable");
-
-    uint aMin = tokensNeeded * (10_000 - slippageBps) / 10_000;
-    uint bMin = totalRaised  * (10_000 - slippageBps) / 10_000;
-
-    (,,uint liquidity) = router.addLiquidity(
-      address(token), address(stable),
-      tokensNeeded, totalRaised,
-      aMin, bMin,
-      address(this),
-      block.timestamp + 30 minutes
-    );
-
-    require(liquidity > 0, "no LP minted");
-    totalLP = liquidity;
-
-    // Discover the LP (pair) token
-    address pair = factory.getPair(address(token), address(stable));
-    require(pair != address(0), "pair not found");
-    lpToken = ILPToken(pair);
-
-    finalized  = true;
-    unlockTime = block.timestamp + lockDuration;
-  }
-
-  /* ---------- Post-lock claims ---------- */
-
-  function lpEntitlement(address user) public view returns (uint) {
-    if (totalRaised == 0 || totalLP == 0) return 0;
-    uint gross = (totalLP * contributed[user]) / totalRaised;
-    if (gross <= lpClaimed[user]) return 0;
-    return gross - lpClaimed[user];
-  }
-
-  function claimLP() external {
-    require(finalized, "not finalized");
-    require(block.timestamp >= unlockTime, "locked");
-    uint amt = lpEntitlement(msg.sender);
-    require(amt > 0, "no LP");
-    lpClaimed[msg.sender] += amt;
-    require(lpToken.transfer(msg.sender, amt), "lp xfer fail");
-  }
-
-  function claimUnderlying(uint minToken, uint minStable) external {
-    require(finalized, "not finalized");
-    require(block.timestamp >= unlockTime, "locked");
-
-    uint amt = lpEntitlement(msg.sender);
-    require(amt > 0, "no LP");
-
-    lpClaimed[msg.sender] += amt;
-
-    // Approve router to pull LP if required by the LP ERC20 (many forks need approve)
-    require(lpToken.approve(address(router), amt), "lp approve fail");
-
-    (uint outA, uint outB) = router.removeLiquidity(
-      address(token), address(stable),
-      amt, minToken, minStable,
-      msg.sender,
-      block.timestamp + 30 minutes
-    );
-
-    // outA/outB are sent directly to the investor
-    require(outA + outB > 0, "nothing out");
-  }
-}
+  <!-- How it Works -->
+  <section class="max-w-4xl mx-auto p-6">
+    <h2 class="text-2xl font-semibold text-center mb-4">How It Works</h2>
+    <div class="grid md:grid-cols-3 gap-6">
+      <div class="bg-white shadow rounded-xl p-4">
+        <h3 class="font-semibold mb-2">Reserve</h3>
+        <p class="text-sm">A reserve pool grows with every trade, providing buyback strength against manipulation.</p>
+      </div>
+      <div class="bg-white shadow rounded-xl p-4">
+        <h3 class="font-semibold mb-2">Relief</h3>
